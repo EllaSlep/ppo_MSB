@@ -12,7 +12,9 @@ import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
+import java.time.Instant
 import java.util.*
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 
 
@@ -44,13 +46,27 @@ class PaymentExternalSystemAdapterImpl(
 
     private val curRequests = Semaphore(parallelRequests)
 
+    private val requestsQueue : Queue<Pair<Request,Long>> = LinkedList()
+    // TODO: очередь запросов, те у которых в данный момент < (60-4,9)сек осталось удалять из очереди
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+        val transactionId = UUID.randomUUID()
+        val request = Request.Builder()
+            .url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+            .post(emptyBody)
+            .build()
+        val startTime = System.currentTimeMillis()
+        requestsQueue.add(Pair(request,startTime))
+        logger.warn("[$accountName] adding pair of request and time in queue: ${requestsQueue.last().first} ; ${requestsQueue.last().second}")
+        while(requestsQueue.isNotEmpty() && System.currentTimeMillis() -  requestsQueue.peek().second > 55100) {
+            val curReq = requestsQueue.poll()
+            logger.info("[$accountName] polling request out of queue: $curReq")
+        }
         rateLimiter.tickBlocking()
         curRequests.acquire()
         try {
             logger.warn("[$accountName] Sending payment request $paymentId")
 
-            val transactionId = UUID.randomUUID()
             logger.info("[$accountName] sending for $paymentId, txId: $transactionId")
 
             // Вне зависимости от исхода оплаты важно отметить, что она была отправлена.
@@ -59,12 +75,12 @@ class PaymentExternalSystemAdapterImpl(
                 it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
             }
 
-            val request = Request.Builder()
-                .url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-                .post(emptyBody)
-                .build()
+            if (requestsQueue.find{it.first == request} == null) {
+                throw SocketTimeoutException()
+            }
 
             try {
+                requestsQueue.remove(requestsQueue.find{it.first == request})
                 client.newCall(request).execute().use { response ->
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -94,7 +110,15 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
-        } finally {
+        }catch (e : Exception) {
+            when (e) {
+                is SocketTimeoutException -> {
+                    logger.error("[$accountName] timeout for txId: $transactionId, payment: $paymentId", e)
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")}
+                }
+            }
+        }finally {
             curRequests.release()
         }
     }
