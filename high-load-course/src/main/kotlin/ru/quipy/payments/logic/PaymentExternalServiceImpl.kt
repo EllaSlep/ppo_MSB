@@ -15,6 +15,7 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
+import kotlin.math.min
 
 class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
@@ -34,6 +35,7 @@ class PaymentExternalSystemAdapterImpl(
     private val processingTimeMs = 700L
     private val requestTimeoutMs = 3500L
     private val maxQueueProcessingPerSec = 10
+    private val maxRetries = 4
 
     private val client = OkHttpClient.Builder().build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
@@ -66,30 +68,46 @@ class PaymentExternalSystemAdapterImpl(
 
         try {
             delay(processingTimeMs)
-            val availableRequests = minOf(maxQueueProcessingPerSec, requestsQueue.size)
+            val availableRequests = min(maxQueueProcessingPerSec, requestsQueue.size)
             repeat(availableRequests) {
                 val requestPair = requestsQueue.poll() ?: return@repeat
                 val requestStartTime = requestPair.second
                 val currentTime = System.currentTimeMillis()
 
                 logger.info("[$accountName] deadline for processing request: ${currentTime - requestStartTime} ms")
-                client.newCall(requestPair.first).execute().use { response ->
-                    val body = try {
-                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] error processing txId: $transactionId, payment: $paymentId", e)
-                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                    }
+                var attempt = 0
+                var delayMs = 100L
+                var shouldRetry: Boolean
 
-                    logger.warn(
-                        "[$accountName] payment processed txId: $transactionId, success: ${body.result}, " +
-                                "message: ${body.message}, httpCode: ${response.code}, response: ${body.message}"
-                    )
+                do {
+                    client.newCall(requestPair.first).execute().use { response ->
+                        val body = try {
+                            mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                        } catch (e: Exception) {
+                            logger.error("[$accountName] [ERROR] error processing txId: $transactionId, payment: $paymentId", e)
+                            ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                        }
 
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        logger.warn(
+                            "[$accountName] payment processed txId: $transactionId, success: ${body.result}, " +
+                                    "message: ${body.message}, httpCode: ${response.code}, response: ${body.message}"
+                        )
+
+                        shouldRetry = (currentTime - requestStartTime <= requestTimeoutMs) && !body.result
+                        if (shouldRetry && attempt < maxRetries) {
+                            attempt++
+                            delayMs = (delayMs * 1.5).toLong().coerceAtMost(1000L)
+                            logger.warn("[$accountName] Retry attempt #$attempt for txId: $transactionId in $delayMs ms")
+                            delay(delayMs)
+                        } else {
+                            shouldRetry = false
+                        }
+
+                        paymentESService.update(paymentId) {
+                            it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                        }
                     }
-                }
+                } while (shouldRetry && attempt < maxRetries)
             }
         } catch (e: Exception) {
             when (e) {
