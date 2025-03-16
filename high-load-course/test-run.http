@@ -15,8 +15,15 @@ Content-Type: application/json
 //}
 
 //case 3
+//{
+//    "ratePerSecond": 2,
+//    "testCount": 500,
+//    "processingTimeMillis": 60000
+//}
+
+//case4
 {
-    "ratePerSecond": 2,
-    "testCount": 500,
-    "processingTimeMillis": 60000
+  "ratePerSecond": 7,
+  "testCount": 800,
+  "processingTimeMillis": 3500
 }
