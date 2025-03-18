@@ -33,7 +33,12 @@ class PaymentExternalSystemAdapterImpl(
     private val requestTimeoutMs = 6000L
     private val maxRetries = 4
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(1, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .writeTimeout(1, TimeUnit.SECONDS)
+        .build()
+
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
     private val executor = Executors.newFixedThreadPool(parallelRequests)
 
@@ -53,12 +58,8 @@ class PaymentExternalSystemAdapterImpl(
 
         rateLimiter.tickBlocking()
 
-        var attempt = 0
-        var delayMs = 100L
-        var shouldRetry: Boolean
-
-        do {
-            shouldRetry = try {
+        retryWithDelay(maxRetries) { attempt ->
+            try {
                 client.newCall(request).execute().use { response ->
                     val body = runCatching {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -73,7 +74,7 @@ class PaymentExternalSystemAdapterImpl(
                         it.logProcessing(body.result, now(), transactionId, reason = body.message)
                     }
 
-                    !body.result && attempt < maxRetries
+                    body.result
                 }
             } catch (e: SocketTimeoutException) {
                 logger.error("[$accountName] timeout for txId: $transactionId, payment: $paymentId", e)
@@ -88,14 +89,19 @@ class PaymentExternalSystemAdapterImpl(
                 }
                 false
             }
+        }
+    }
 
-            if (shouldRetry) {
-                attempt++
-                logger.warn("[$accountName] Retry attempt #$attempt for txId: $transactionId in $delayMs ms")
-                Thread.sleep(delayMs)
-                delayMs = (delayMs * 1.5).toLong().coerceAtMost(1000L)
-            }
-        } while (shouldRetry)
+    private fun retryWithDelay(retries: Int, block: (Int) -> Boolean) {
+        var attempt = 0
+        var delayMs = 100L
+        while (attempt < retries) {
+            if (block(attempt)) return
+            attempt++
+            logger.warn("[$accountName] Retry attempt #$attempt in $delayMs ms")
+            CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS).execute {}
+            delayMs = (delayMs * 1.5).toLong().coerceAtMost(1000L)
+        }
     }
 
     override fun price() = properties.price
