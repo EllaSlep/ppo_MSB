@@ -35,7 +35,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(1, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
         .writeTimeout(1, TimeUnit.SECONDS)
         .build()
 
