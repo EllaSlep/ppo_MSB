@@ -30,12 +30,12 @@ class PaymentExternalSystemAdapterImpl(
     private val accountName = properties.accountName
     private val rateLimitPerSec = properties.rateLimitPerSec.toLong()
     private val parallelRequests = properties.parallelRequests
-    private val requestTimeoutMs = 6000L
+    private val requestTimeoutMs = 50000L
     private val maxRetries = 4
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(1, TimeUnit.SECONDS)
-        .readTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(40, TimeUnit.SECONDS)
         .writeTimeout(1, TimeUnit.SECONDS)
         .build()
 
@@ -53,7 +53,7 @@ class PaymentExternalSystemAdapterImpl(
         val request = Request.Builder()
             .url("http://localhost:1234/external/process?serviceName=$serviceName&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
             .post(emptyBody)
-            .addHeader("deadline", (now() + 5000).toString())
+            .addHeader("deadline", (now() + 49500).toString())
             .build()
 
         rateLimiter.tickBlocking()
@@ -94,13 +94,13 @@ class PaymentExternalSystemAdapterImpl(
 
     private fun retryWithDelay(retries: Int, block: (Int) -> Boolean) {
         var attempt = 0
-        var delayMs = 100L
+        var delayMs = 500L
         while (attempt < retries) {
             if (block(attempt)) return
             attempt++
             logger.warn("[$accountName] Retry attempt #$attempt in $delayMs ms")
             CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS).execute {}
-            delayMs = (delayMs * 1.5).toLong().coerceAtMost(1000L)
+            delayMs = (delayMs * 1.5).toLong().coerceAtMost(10000L)
         }
     }
 
