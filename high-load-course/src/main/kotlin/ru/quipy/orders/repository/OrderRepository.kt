@@ -19,7 +19,6 @@ class OrderRepository {
     lateinit var subscriptionsManager: AggregateSubscriptionsManager
 
     private val orderCache = Caffeine.newBuilder()
-        .initialCapacity(500_000)
         .maximumSize(100_000_000)
         .expireAfterWrite(Duration.ofHours(5))
         .build<UUID, Order?>()
